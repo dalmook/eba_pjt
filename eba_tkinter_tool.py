@@ -371,15 +371,43 @@ class OracleHelper:
             cur.close()
     def insert_dataframe_into_table(self, df, table_name, batch_size=1000):
         cur = self.conn.cursor()
-        work_df = df.replace({np.nan: None}).where(pd.notnull(df), None)
+        work_df = df.copy()
+        type_cur = self.conn.cursor()
+        type_cur.execute(
+            "SELECT COLUMN_NAME, DATA_TYPE FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :tbl ORDER BY COLUMN_ID",
+            {"tbl": table_name.upper()},
+        )
+        type_map = {name.upper(): dtype.upper() for name, dtype in type_cur.fetchall()}
+        type_cur.close()
+        for col in work_df.columns:
+            dtype = type_map.get(col.upper(), "")
+            if dtype in {"VARCHAR2", "VARCHAR", "CHAR", "NCHAR", "NVARCHAR2", "CLOB"}:
+                work_df[col] = work_df[col].apply(lambda v: None if pd.isna(v) else str(v))
+            elif dtype in {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE"}:
+                work_df[col] = pd.to_numeric(work_df[col], errors="coerce")
+            elif dtype == "DATE" or dtype.startswith("TIMESTAMP"):
+                work_df[col] = pd.to_datetime(work_df[col], errors="coerce")
+                work_df[col] = work_df[col].apply(
+                    lambda v: None if pd.isna(v) else (v.to_pydatetime() if isinstance(v, pd.Timestamp) else v)
+                )
+        work_df = work_df.replace({np.nan: None}).where(pd.notnull(work_df), None)
         cols = list(work_df.columns)
         sql = f"INSERT INTO {table_name} ({', '.join(cols)}) VALUES ({', '.join(f':{i+1}' for i in range(len(cols)))})"
         rows = [tuple(r) for r in work_df.itertuples(index=False, name=None)]
-        for start in range(0, len(rows), batch_size):
-            batch = rows[start:start+batch_size]
-            cur.executemany(sql, batch)
-            self.conn.commit()
-            self.logger.info('DB 적재 진행: %s / %s', min(start + batch_size, len(rows)), len(rows))
+        try:
+            for start in range(0, len(rows), batch_size):
+                batch = rows[start:start+batch_size]
+                cur.executemany(sql, batch)
+                self.conn.commit()
+                self.logger.info('DB 적재 진행: %s / %s', min(start + batch_size, len(rows)), len(rows))
+        except oracledb.NotSupportedError:
+            self.logger.warning("executemany 타입 바인딩 실패, 행 단위 적재로 재시도합니다.")
+            self.conn.rollback()
+            for idx, row in enumerate(rows, 1):
+                cur.execute(sql, row)
+                if idx % batch_size == 0 or idx == len(rows):
+                    self.conn.commit()
+                    self.logger.info('DB 적재 진행(행단위): %s / %s', idx, len(rows))
         cur.close()
     def read_sql(self, sql, params=None):
         return pd.read_sql(sql, self.conn, params=params)
@@ -643,7 +671,7 @@ class EbaTkApp(tk.Tk):
             processor = EbaProcessor(self.logger)
             df = processor.prepare_raw_df(df_raw, df_fam6, planid)
             with pd.ExcelWriter(output_dir / 'ebaTOgscmdb.xlsx', engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, header=True, startrow=0, startcol=2)
+                df.to_excel(writer, index=False, header=True, startrow=0, startcol=0)
             oracle.connect()
             oracle.delete_table_if_exists(NEW_TABLE_NAME)
             oracle.copy_table_structure(OLD_TABLE_NAME, NEW_TABLE_NAME)
