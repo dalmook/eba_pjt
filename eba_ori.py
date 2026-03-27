@@ -8,6 +8,7 @@ import queue
 import threading
 import logging
 import traceback
+import calendar
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -51,7 +52,7 @@ class Config:
     OLD_TABLE_NAME: str = "gui_eba_2yr"
     NEW_TABLE_NAME: str = "gui_eba_2yr_new"
     REQUEST_TIMEOUT: int = 30
-    O9_SQL_PATH: str = os.getenv("O9_SQL_PATH", "o9_upload.sql")
+    O9_MEASURE_NAME: str = os.getenv("O9_MEASURE_NAME", "WHInPlanOverride")
 
 CFG = Config()
 
@@ -290,19 +291,23 @@ GROUP BY FAM6
 
 QUERY = QUERY.replace("gui_eba_2yr_test", CFG.NEW_TABLE_NAME)
 
-DEFAULT_O9_SQL = """
--- Optional: place exact SQL from gist in o9_upload.sql (or set O9_SQL_PATH env).
--- Use token {new_table_name} if table name substitution is needed.
-SELECT *
-FROM {new_table_name}
-WHERE PLANID = :plan_id
+O9_BASE_QUERY = f"""
+SELECT
+    A.PLANID AS VERSION_NAME,
+    A.FAM6_ADJ AS FAM6,
+    NVL(B.SITEID, A.LINE) AS SITEID,
+    A.Y0M3, A.Y0M4, A.Y0M5, A.Y0M6, A.Y0M7, A.Y0M8, A.Y0M9, A.Y0M10, A.Y0M11, A.Y0M12,
+    A.Y1M1, A.Y1M2, A.Y1M3, A.Y1M4, A.Y1M5, A.Y1M6, A.Y1M7, A.Y1M8, A.Y1M9, A.Y1M10, A.Y1M11, A.Y1M12
+FROM {CFG.NEW_TABLE_NAME} A
+LEFT JOIN MTA_FABLINE B ON A.LINE = B.LINE
+WHERE A.PLANID = :plan_id
+  AND A.GUBUN = 'WH_GUIDE'
 """
 
-def load_o9_sql() -> str:
-    sql_path = Path(CFG.O9_SQL_PATH)
-    if sql_path.exists():
-        return sql_path.read_text(encoding="utf-8")
-    return DEFAULT_O9_SQL
+O9_MONTHS = [
+    "202603", "202604", "202605", "202606", "202607", "202608", "202609", "202610", "202611", "202612",
+    "202701", "202702", "202703", "202704", "202705", "202706", "202707", "202708", "202709", "202710", "202711", "202712",
+]
 
 def sanitize_filename(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', '_', value.strip())
@@ -672,41 +677,40 @@ class ExcelProcessor:
         wb.save(summary_path)
         return summary_path
 
-    def _pivot_o9_result(self, df_raw: pd.DataFrame) -> pd.DataFrame:
-        if df_raw.empty:
-            return df_raw
-        month_col = next((c for c in ["YEARMONTH", "MONTH", "BASE_MONTH"] if c in df_raw.columns), None)
-        value_col = next((c for c in ["QTY", "VALUE", "AMOUNT", "VOL"] if c in df_raw.columns), None)
-        if not month_col or not value_col:
-            numeric_like_cols = [
-                c for c in df_raw.columns
-                if pd.api.types.is_numeric_dtype(df_raw[c]) and str(c).upper() not in {"PLANID"}
-            ]
-            if len(numeric_like_cols) == 1:
-                value_col = numeric_like_cols[0]
-                month_col = next((c for c in df_raw.columns if "MONTH" in str(c).upper()), None)
-        if not month_col or not value_col:
-            self.logger.warning("O9 피벗 기준 컬럼을 찾지 못해 원본 결과만 저장합니다.")
-            return df_raw
-        index_cols = [c for c in df_raw.columns if c not in {month_col, value_col}]
-        pivot_df = pd.pivot_table(
-            df_raw,
-            index=index_cols,
-            columns=month_col,
-            values=value_col,
-            aggfunc="sum",
-            fill_value=0,
-            observed=True,
-        ).reset_index()
-        return pivot_df
+    def _build_o9_body(self, df_o9: pd.DataFrame) -> pd.DataFrame:
+        value_cols = [f"Y0M{i}" for i in range(3, 13)] + [f"Y1M{i}" for i in range(1, 13)]
+        missing = [c for c in ["VERSION_NAME", "FAM6", "SITEID"] + value_cols if c not in df_o9.columns]
+        if missing:
+            raise RuntimeError(f"O9 결과 생성용 컬럼 누락: {missing}")
+        grouped = (
+            df_o9[["VERSION_NAME", "FAM6", "SITEID"] + value_cols]
+            .groupby(["VERSION_NAME", "FAM6", "SITEID"], dropna=False, as_index=False)
+            .sum(numeric_only=True)
+        )
+        grouped.insert(3, "Measure", CFG.O9_MEASURE_NAME)
+        rename_map = {col: month for col, month in zip(value_cols, O9_MONTHS)}
+        grouped = grouped.rename(columns=rename_map)
+        ordered_cols = ["VERSION_NAME", "FAM6", "SITEID", "Measure"] + O9_MONTHS
+        grouped = grouped[ordered_cols]
+        for col in O9_MONTHS:
+            grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0).map(lambda x: f"{x:.4f}")
+        return grouped
 
     def build_o9_upload_file(self, df_o9: pd.DataFrame, output_dir: Path, planid: str) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = output_dir / f"o9_upload_{sanitize_filename(planid)}_{timestamp}.xlsx"
-        pivot_df = self._pivot_o9_result(df_o9)
+        body_df = self._build_o9_body(df_o9)
+
+        year_header = ["", "", "", ""] + [f"Time.[Year].[{m[:4]}]" for m in O9_MONTHS]
+        month_header = ["", "", "", ""] + [f"Time.[Month].[{m}]" for m in O9_MONTHS]
+        mtd_header = ["Version.[Version Name]", "FAM6Item.[FAM6]", "Line.[Line]", "Measure"] + [
+            f"Time.[MTD].[{calendar.monthrange(int(m[:4]), int(m[4:]))[1]}]" for m in O9_MONTHS
+        ]
+        header_df = pd.DataFrame([year_header, month_header, mtd_header], columns=body_df.columns)
+        final_df = pd.concat([header_df, body_df], ignore_index=True)
+
         with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-            df_o9.to_excel(writer, sheet_name="o9_raw", index=False)
-            pivot_df.to_excel(writer, sheet_name="o9_pivot", index=False)
+            final_df.to_excel(writer, sheet_name="o9_final", index=False, header=False)
         self.logger.info("O9 업로드 파일 생성: %s", output_path)
         return output_path
 
@@ -744,8 +748,7 @@ class JobRunner:
             df_sunipgo.to_excel(output_dir / 'df_sunipgo.xlsx', index=False)
             excel_processor = ExcelProcessor(self.logger)
             excel_processor.build_summary_files(df_sunipgo, df_info, output_dir)
-            o9_sql = load_o9_sql().replace("{new_table_name}", CFG.NEW_TABLE_NAME)
-            df_o9 = oracle.read_sql(o9_sql, params=params)
+            df_o9 = oracle.read_sql(O9_BASE_QUERY, params=params)
             excel_processor.build_o9_upload_file(df_o9, output_dir, planid)
             self.logger.info(elapsed_text(start_time))
             self.app.after(0, lambda: messagebox.showinfo('완료', f'작업이 완료되었습니다.\n\nOutput 폴더:\n{output_dir}'))
