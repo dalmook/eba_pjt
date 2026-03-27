@@ -519,9 +519,21 @@ class EDMClient:
         fam6_sheet = next((sh for sh in wb.sheets if sh.name.strip().upper() == 'FAM6_ADJ'), None)
         if fam6_sheet is None:
             raise RuntimeError('FAM6_ADJ 시트를 찾지 못했습니다.')
-        used = sim_sheet.used_range
-        start_row = used.row
-        last_row = used.last_cell.row
+        column_a = sim_sheet.range('A:A').value
+        start_row = None
+        last_row = None
+        for i, value in enumerate(column_a, start=1):
+            if value is not None and value != "":
+                start_row = i
+                break
+        for i, value in enumerate(column_a[::-1], start=1):
+            if value is not None and value != "":
+                last_row = len(column_a) - i + 1
+                break
+        if start_row is None or last_row is None:
+            raise RuntimeError("Simulation 시트에서 데이터 시작/종료 행을 찾지 못했습니다.")
+        if last_row < start_row:
+            raise RuntimeError(f"Simulation 범위 오류: start_row={start_row}, last_row={last_row}")
         df = sim_sheet.range(f'BB{start_row}:CJ{last_row}').options(pd.DataFrame, index=False, header=False).value
         drop_cols = [c for c in [33, 34] if c in df.columns]
         if drop_cols:
