@@ -634,8 +634,6 @@ class EDMClient:
         if sim_sheet is None:
             raise RuntimeError('Simulation 시트를 찾지 못했습니다.')
         fam6_sheet = next((sh for sh in wb.sheets if sh.name.strip().upper() == 'FAM6_ADJ'), None)
-        if fam6_sheet is None:
-            raise RuntimeError('FAM6_ADJ 시트를 찾지 못했습니다.')
         column_a = sim_sheet.range('A:A').value
         start_row = None
         last_row = None
@@ -658,9 +656,13 @@ class EDMClient:
         if df.shape[1] != len(SIM_COLUMNS):
             raise RuntimeError(f'Simulation 컬럼 수 불일치: {df.shape[1]} / 기대 {len(SIM_COLUMNS)}')
         df.columns = SIM_COLUMNS
-        df_fam6 = fam6_sheet.range('A1').options(pd.DataFrame, index=False, expand='table').value
-        if 'FAM6' not in df_fam6.columns or 'FAM6_ADJ' not in df_fam6.columns:
-            raise RuntimeError('FAM6_ADJ 시트에 FAM6 / FAM6_ADJ 컬럼이 필요합니다.')
+        if fam6_sheet is None:
+            self.logger.warning('FAM6_ADJ 시트를 찾지 못했습니다. UI FAM6 매핑을 사용합니다.')
+            df_fam6 = pd.DataFrame(columns=['FAM6', 'FAM6_ADJ'])
+        else:
+            df_fam6 = fam6_sheet.range('A1').options(pd.DataFrame, index=False, expand='table').value
+            if 'FAM6' not in df_fam6.columns or 'FAM6_ADJ' not in df_fam6.columns:
+                raise RuntimeError('FAM6_ADJ 시트에 FAM6 / FAM6_ADJ 컬럼이 필요합니다.')
         return df, df_fam6
     @staticmethod
     def close_workbook_safe(wb):
