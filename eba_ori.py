@@ -4,6 +4,7 @@
 import os
 import re
 import time
+import json
 import queue
 import threading
 import logging
@@ -52,6 +53,8 @@ class Config:
     OLD_TABLE_NAME: str = "gui_eba_2yr"
     NEW_TABLE_NAME: str = "gui_eba_2yr_new"
     REQUEST_TIMEOUT: int = 30
+    SETTINGS_PATH: str = "eba_settings.json"
+    FAM6_MAPPING_PATH: str = "fam6_mapping.csv"
 
 CFG = Config()
 
@@ -380,6 +383,30 @@ def build_o9_months(planid: str) -> list[str]:
 def sanitize_filename(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', '_', value.strip())
 
+def load_settings() -> dict:
+    path = Path(CFG.SETTINGS_PATH)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_settings(data: dict):
+    Path(CFG.SETTINGS_PATH).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_fam6_mapping_file() -> pd.DataFrame:
+    path = Path(CFG.FAM6_MAPPING_PATH)
+    if path.exists():
+        df = pd.read_csv(path)
+        if "FAM6" in df.columns and "FAM6_ADJ" in df.columns:
+            return df[["FAM6", "FAM6_ADJ"]].dropna(how="all")
+    return pd.DataFrame(columns=["FAM6", "FAM6_ADJ"])
+
+def save_fam6_mapping_file(df: pd.DataFrame):
+    df = df[["FAM6", "FAM6_ADJ"]].fillna("")
+    df.to_csv(CFG.FAM6_MAPPING_PATH, index=False, encoding="utf-8-sig")
+
 def month_to_quarter(month: int):
     if 1 <= month <= 3:
         return 'Q1'
@@ -607,8 +634,6 @@ class EDMClient:
         if sim_sheet is None:
             raise RuntimeError('Simulation 시트를 찾지 못했습니다.')
         fam6_sheet = next((sh for sh in wb.sheets if sh.name.strip().upper() == 'FAM6_ADJ'), None)
-        if fam6_sheet is None:
-            raise RuntimeError('FAM6_ADJ 시트를 찾지 못했습니다.')
         column_a = sim_sheet.range('A:A').value
         start_row = None
         last_row = None
@@ -631,9 +656,13 @@ class EDMClient:
         if df.shape[1] != len(SIM_COLUMNS):
             raise RuntimeError(f'Simulation 컬럼 수 불일치: {df.shape[1]} / 기대 {len(SIM_COLUMNS)}')
         df.columns = SIM_COLUMNS
-        df_fam6 = fam6_sheet.range('A1').options(pd.DataFrame, index=False, expand='table').value
-        if 'FAM6' not in df_fam6.columns or 'FAM6_ADJ' not in df_fam6.columns:
-            raise RuntimeError('FAM6_ADJ 시트에 FAM6 / FAM6_ADJ 컬럼이 필요합니다.')
+        if fam6_sheet is None:
+            self.logger.warning('FAM6_ADJ 시트를 찾지 못했습니다. UI FAM6 매핑을 사용합니다.')
+            df_fam6 = pd.DataFrame(columns=['FAM6', 'FAM6_ADJ'])
+        else:
+            df_fam6 = fam6_sheet.range('A1').options(pd.DataFrame, index=False, expand='table').value
+            if 'FAM6' not in df_fam6.columns or 'FAM6_ADJ' not in df_fam6.columns:
+                raise RuntimeError('FAM6_ADJ 시트에 FAM6 / FAM6_ADJ 컬럼이 필요합니다.')
         return df, df_fam6
     @staticmethod
     def close_workbook_safe(wb):
@@ -806,6 +835,10 @@ class JobRunner:
             reader = EDMClient(self.logger)
             wb = reader.open_edm_and_attach_workbook(edm_link)
             df_raw, df_fam6 = reader.read_simulation_and_fam6(wb)
+            ui_mapping = self.app.get_fam6_mapping_df()
+            if not ui_mapping.empty:
+                df_fam6 = ui_mapping
+                self.logger.info("UI FAM6 매핑 사용: %s건", len(df_fam6))
             if not keep_excel_open:
                 reader.close_workbook_safe(wb)
                 wb = None
@@ -844,6 +877,49 @@ class JobRunner:
             self.app.after(0, self.app._finish_run)
 
 
+class Fam6ManagerDialog(tk.Toplevel):
+    def __init__(self, master, df_mapping: pd.DataFrame, on_save):
+        super().__init__(master)
+        self.title("FAM6 관리")
+        self.geometry("760x520")
+        self.on_save = on_save
+        self.tree = ttk.Treeview(self, columns=("FAM6", "FAM6_ADJ"), show="headings")
+        self.tree.heading("FAM6", text="FAM6")
+        self.tree.heading("FAM6_ADJ", text="FAM6_ADJ")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        for _, row in df_mapping.fillna("").iterrows():
+            self.tree.insert("", "end", values=(row["FAM6"], row["FAM6_ADJ"]))
+
+        form = ttk.Frame(self)
+        form.pack(fill="x", padx=10)
+        self.fam6_var = tk.StringVar()
+        self.fam6_adj_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.fam6_var, width=35).pack(side="left", padx=4)
+        ttk.Entry(form, textvariable=self.fam6_adj_var, width=35).pack(side="left", padx=4)
+        ttk.Button(form, text="추가", command=self.add_row).pack(side="left", padx=4)
+        ttk.Button(form, text="선택삭제", command=self.delete_selected).pack(side="left", padx=4)
+        ttk.Button(form, text="저장", command=self.save).pack(side="right", padx=4)
+
+    def add_row(self):
+        fam6 = self.fam6_var.get().strip()
+        fam6_adj = self.fam6_adj_var.get().strip()
+        if fam6:
+            self.tree.insert("", "end", values=(fam6, fam6_adj or fam6))
+            self.fam6_var.set("")
+            self.fam6_adj_var.set("")
+
+    def delete_selected(self):
+        for item in self.tree.selection():
+            self.tree.delete(item)
+
+    def save(self):
+        rows = [self.tree.item(i, "values") for i in self.tree.get_children("")]
+        df = pd.DataFrame(rows, columns=["FAM6", "FAM6_ADJ"])
+        df = df[(df["FAM6"].astype(str).str.strip() != "")]
+        self.on_save(df)
+        self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -852,6 +928,8 @@ class App(tk.Tk):
         self.log_queue = queue.Queue()
         self.worker = None
         self.last_output_dir = None
+        self.settings = load_settings()
+        self.fam6_mapping_df = load_fam6_mapping_file()
         self.logger = logging.getLogger('eba_tool')
         self.logger.setLevel(logging.INFO)
         self.logger.handlers.clear()
@@ -864,7 +942,7 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=12)
         top.pack(fill='x')
         ttk.Label(top, text='EDM LINK').grid(row=0, column=0, sticky='w', padx=(0, 8), pady=4)
-        self.edm_var = tk.StringVar(value=CFG.DEFAULT_EDM_LINK)
+        self.edm_var = tk.StringVar(value=self.settings.get("edm_link", CFG.DEFAULT_EDM_LINK))
         ttk.Entry(top, textvariable=self.edm_var, width=110).grid(row=0, column=1, sticky='ew', pady=4)
         ttk.Label(top, text='PLANID').grid(row=1, column=0, sticky='w', padx=(0, 8), pady=4)
         self.planid_var = tk.StringVar()
@@ -877,6 +955,7 @@ class App(tk.Tk):
         self.run_btn.pack(side='left')
         ttk.Button(btns, text='로그 지우기', command=lambda: self.log_text.delete('1.0', 'end')).pack(side='left', padx=6)
         ttk.Button(btns, text='Output 폴더 열기', command=self.open_output_folder).pack(side='left')
+        ttk.Button(btns, text='FAM6 관리', command=self.open_fam6_manager).pack(side='left', padx=6)
         top.columnconfigure(1, weight=1)
         mid = ttk.Frame(self, padding=(12, 0, 12, 8))
         mid.pack(fill='x')
@@ -906,11 +985,24 @@ class App(tk.Tk):
         if not edm_link:
             messagebox.showwarning('입력 필요', 'EDM LINK를 입력해 주세요.')
             return
+        self.settings["edm_link"] = edm_link
+        save_settings(self.settings)
         self.run_btn.config(state='disabled')
         self.status_var.set('실행 중...')
         runner = JobRunner(self, self.logger)
         self.worker = threading.Thread(target=runner.run, args=(edm_link, planid, self.keep_excel_open_var.get()), daemon=True)
         self.worker.start()
+
+    def open_fam6_manager(self):
+        Fam6ManagerDialog(self, self.fam6_mapping_df, self._save_fam6_mapping)
+
+    def _save_fam6_mapping(self, df: pd.DataFrame):
+        self.fam6_mapping_df = df.drop_duplicates(subset=["FAM6"], keep="first")
+        save_fam6_mapping_file(self.fam6_mapping_df)
+        self.logger.info("FAM6 매핑 저장 완료: %s건", len(self.fam6_mapping_df))
+
+    def get_fam6_mapping_df(self) -> pd.DataFrame:
+        return self.fam6_mapping_df.copy()
     def _finish_run(self):
         self.run_btn.config(state='normal')
         self.status_var.set('대기 중')
