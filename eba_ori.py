@@ -762,7 +762,7 @@ class ExcelProcessor:
         ordered_cols = ["VERSION_NAME", "FAM6", "SITEID", "Measure"] + o9_months
         grouped = grouped[ordered_cols]
         for col in o9_months:
-            grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0).map(lambda x: f"{x:.4f}")
+            grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0.0)
         return grouped
 
     def build_o9_upload_file(self, df_o9: pd.DataFrame, output_dir: Path, planid: str) -> Path:
@@ -781,6 +781,11 @@ class ExcelProcessor:
 
         with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
             final_df.to_excel(writer, sheet_name="o9_final", index=False, header=False)
+            ws = writer.sheets["o9_final"]
+            num_fmt = writer.book.add_format({"num_format": "0.0000"})
+            start_col = 4  # E열부터 숫자영역
+            end_col = start_col + len(o9_months) - 1
+            ws.set_column(start_col, end_col, 14, num_fmt)
         self.logger.info("O9 업로드 파일 생성: %s", output_path)
         return output_path
 
