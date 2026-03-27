@@ -52,7 +52,6 @@ class Config:
     OLD_TABLE_NAME: str = "gui_eba_2yr"
     NEW_TABLE_NAME: str = "gui_eba_2yr_new"
     REQUEST_TIMEOUT: int = 30
-    O9_MEASURE_NAME: str = os.getenv("O9_MEASURE_NAME", "WHInPlanOverride")
 
 CFG = Config()
 
@@ -292,22 +291,91 @@ GROUP BY FAM6
 QUERY = QUERY.replace("gui_eba_2yr_test", CFG.NEW_TABLE_NAME)
 
 O9_BASE_QUERY = f"""
-SELECT
-    A.PLANID AS VERSION_NAME,
-    A.FAM6_ADJ AS FAM6,
-    NVL(B.SITEID, A.LINE) AS SITEID,
-    A.Y0M3, A.Y0M4, A.Y0M5, A.Y0M6, A.Y0M7, A.Y0M8, A.Y0M9, A.Y0M10, A.Y0M11, A.Y0M12,
-    A.Y1M1, A.Y1M2, A.Y1M3, A.Y1M4, A.Y1M5, A.Y1M6, A.Y1M7, A.Y1M8, A.Y1M9, A.Y1M10, A.Y1M11, A.Y1M12
-FROM {CFG.NEW_TABLE_NAME} A
-LEFT JOIN MTA_FABLINE B ON A.LINE = B.LINE
-WHERE A.PLANID = :plan_id
-  AND A.GUBUN = 'WH_GUIDE'
+WITH BASE AS (
+    SELECT A.PLANID AS VERSION_NAME, A.FAM6_ADJ, A.LINE, NVL(B.SITEID, A.LINE) AS SITEID, A.GUBUN,
+           A.Y0M1, A.Y0M2, A.Y0M3, A.Y0M4, A.Y0M5, A.Y0M6, A.Y0M7, A.Y0M8, A.Y0M9, A.Y0M10, A.Y0M11, A.Y0M12,
+           A.Y1M1, A.Y1M2, A.Y1M3, A.Y1M4, A.Y1M5, A.Y1M6, A.Y1M7, A.Y1M8, A.Y1M9, A.Y1M10, A.Y1M11, A.Y1M12
+    FROM {CFG.NEW_TABLE_NAME} A
+    LEFT JOIN MTA_FABLINE B ON A.LINE = B.LINE
+    WHERE A.PLANID = :plan_id
+)
+SELECT VERSION_NAME, FAM6_ADJ AS FAM6, SITEID, MEASURE,
+       Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+       Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+FROM (
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'FABOutPlanOverride' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'FAB_OUT'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'PETransferOverride' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'FAB_P_E' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'WHInPlanOverride' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'WH_GUIDE' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'FABTATOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'CF'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'EDSTATOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'CE' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'BETATOverrideTwin' MEASURE,
+           SUM(Y0M1), SUM(Y0M2), SUM(Y0M3), SUM(Y0M4), SUM(Y0M5), SUM(Y0M6), SUM(Y0M7), SUM(Y0M8), SUM(Y0M9), SUM(Y0M10), SUM(Y0M11), SUM(Y0M12),
+           SUM(Y1M1), SUM(Y1M2), SUM(Y1M3), SUM(Y1M4), SUM(Y1M5), SUM(Y1M6), SUM(Y1M7), SUM(Y1M8), SUM(Y1M9), SUM(Y1M10), SUM(Y1M11), SUM(Y1M12)
+    FROM BASE WHERE GUBUN IN ('CA', 'CT') AND FAM6_ADJ NOT LIKE 'ER%'
+    GROUP BY VERSION_NAME, FAM6_ADJ, LINE, SITEID
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'FABYieldOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'YF'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'EDSYieldOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'YE' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'ASYYieldOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'YA' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'TSTYieldOverrideTwin' MEASURE,
+           Y0M1, Y0M2, Y0M3, Y0M4, Y0M5, Y0M6, Y0M7, Y0M8, Y0M9, Y0M10, Y0M11, Y0M12,
+           Y1M1, Y1M2, Y1M3, Y1M4, Y1M5, Y1M6, Y1M7, Y1M8, Y1M9, Y1M10, Y1M11, Y1M12
+    FROM BASE WHERE GUBUN = 'YT' AND FAM6_ADJ NOT LIKE 'ER%'
+    UNION ALL
+    SELECT VERSION_NAME, FAM6_ADJ, LINE, SITEID, 'MODYieldOverrideTwin' MEASURE,
+           1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1
+    FROM BASE WHERE GUBUN = 'YT' AND FAM6_ADJ NOT LIKE 'ER%'
+)
+ORDER BY FAM6, SITEID, MEASURE DESC
 """
 
-O9_MONTHS = [
-    "202603", "202604", "202605", "202606", "202607", "202608", "202609", "202610", "202611", "202612",
-    "202701", "202702", "202703", "202704", "202705", "202706", "202707", "202708", "202709", "202710", "202711", "202712",
-]
+def build_o9_months(planid: str) -> list[str]:
+    m = re.search(r"(20\d{2})(0[1-9]|1[0-2])", planid)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+    else:
+        year, month = 2026, 1
+    months = []
+    for _ in range(24):
+        months.append(f"{year}{month:02d}")
+        month += 1
+        if month == 13:
+            month = 1
+            year += 1
+    return months
 
 def sanitize_filename(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', '_', value.strip())
@@ -677,34 +745,36 @@ class ExcelProcessor:
         wb.save(summary_path)
         return summary_path
 
-    def _build_o9_body(self, df_o9: pd.DataFrame) -> pd.DataFrame:
-        value_cols = [f"Y0M{i}" for i in range(3, 13)] + [f"Y1M{i}" for i in range(1, 13)]
-        missing = [c for c in ["VERSION_NAME", "FAM6", "SITEID"] + value_cols if c not in df_o9.columns]
+    def _build_o9_body(self, df_o9: pd.DataFrame, planid: str) -> pd.DataFrame:
+        value_cols = [f"Y0M{i}" for i in range(1, 13)] + [f"Y1M{i}" for i in range(1, 13)]
+        missing = [c for c in ["VERSION_NAME", "FAM6", "SITEID", "MEASURE"] + value_cols if c not in df_o9.columns]
         if missing:
             raise RuntimeError(f"O9 결과 생성용 컬럼 누락: {missing}")
         grouped = (
-            df_o9[["VERSION_NAME", "FAM6", "SITEID"] + value_cols]
-            .groupby(["VERSION_NAME", "FAM6", "SITEID"], dropna=False, as_index=False)
+            df_o9[["VERSION_NAME", "FAM6", "SITEID", "MEASURE"] + value_cols]
+            .groupby(["VERSION_NAME", "FAM6", "SITEID", "MEASURE"], dropna=False, as_index=False)
             .sum(numeric_only=True)
         )
-        grouped.insert(3, "Measure", CFG.O9_MEASURE_NAME)
-        rename_map = {col: month for col, month in zip(value_cols, O9_MONTHS)}
+        grouped = grouped.rename(columns={"MEASURE": "Measure"})
+        o9_months = build_o9_months(planid)
+        rename_map = {col: month for col, month in zip(value_cols, o9_months)}
         grouped = grouped.rename(columns=rename_map)
-        ordered_cols = ["VERSION_NAME", "FAM6", "SITEID", "Measure"] + O9_MONTHS
+        ordered_cols = ["VERSION_NAME", "FAM6", "SITEID", "Measure"] + o9_months
         grouped = grouped[ordered_cols]
-        for col in O9_MONTHS:
+        for col in o9_months:
             grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0).map(lambda x: f"{x:.4f}")
         return grouped
 
     def build_o9_upload_file(self, df_o9: pd.DataFrame, output_dir: Path, planid: str) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = output_dir / f"o9_upload_{sanitize_filename(planid)}_{timestamp}.xlsx"
-        body_df = self._build_o9_body(df_o9)
+        body_df = self._build_o9_body(df_o9, planid)
+        o9_months = body_df.columns.tolist()[4:]
 
-        year_header = ["", "", "", ""] + [f"Time.[Year].[{m[:4]}]" for m in O9_MONTHS]
-        month_header = ["", "", "", ""] + [f"Time.[Month].[{m}]" for m in O9_MONTHS]
+        year_header = ["", "", "", ""] + [f"Time.[Year].[{m[:4]}]" for m in o9_months]
+        month_header = ["", "", "", ""] + [f"Time.[Month].[{m}]" for m in o9_months]
         mtd_header = ["Version.[Version Name]", "FAM6Item.[FAM6]", "Line.[Line]", "Measure"] + [
-            f"Time.[MTD].[{calendar.monthrange(int(m[:4]), int(m[4:]))[1]}]" for m in O9_MONTHS
+            f"Time.[MTD].[{calendar.monthrange(int(m[:4]), int(m[4:]))[1]}]" for m in o9_months
         ]
         header_df = pd.DataFrame([year_header, month_header, mtd_header], columns=body_df.columns)
         final_df = pd.concat([header_df, body_df], ignore_index=True)
