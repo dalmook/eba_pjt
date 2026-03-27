@@ -398,7 +398,28 @@ def save_settings(data: dict):
 def load_fam6_mapping_file() -> pd.DataFrame:
     path = Path(CFG.FAM6_MAPPING_PATH)
     if path.exists():
-        df = pd.read_csv(path)
+        df = None
+        last_err = None
+        for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin1"]:
+            try:
+                df = pd.read_csv(path, encoding=enc)
+                break
+            except Exception as e:
+                last_err = e
+        if df is None:
+            raise RuntimeError(f"FAM6 매핑 CSV를 읽지 못했습니다: {path} ({last_err})")
+        # markdown table 형태(FAM6 | FAM6_ADJ) 붙여넣기 대응
+        if not {"FAM6", "FAM6_ADJ"}.issubset(df.columns):
+            raw_text = path.read_text(encoding="utf-8", errors="ignore")
+            rows = []
+            for line in raw_text.splitlines():
+                if "|" not in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 2 and parts[0] and parts[1] and parts[0] != "FAM6" and not set(parts[0]) <= {"-"}:
+                    rows.append((parts[0], parts[1]))
+            if rows:
+                df = pd.DataFrame(rows, columns=["FAM6", "FAM6_ADJ"])
         if "FAM6" in df.columns and "FAM6_ADJ" in df.columns:
             return df[["FAM6", "FAM6_ADJ"]].dropna(how="all")
     return pd.DataFrame(columns=["FAM6", "FAM6_ADJ"])
