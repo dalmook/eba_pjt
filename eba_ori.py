@@ -49,8 +49,9 @@ class Config:
     HTTP_PROXY: str = "http://12.26.204.100:8080"
     HTTPS_PROXY: str = "http://12.26.204.100:8080"
     OLD_TABLE_NAME: str = "gui_eba_2yr"
-    NEW_TABLE_NAME: str = "gui_eba_2yr_test"
+    NEW_TABLE_NAME: str = "gui_eba_2yr_new"
     REQUEST_TIMEOUT: int = 30
+    O9_SQL_PATH: str = os.getenv("O9_SQL_PATH", "o9_upload.sql")
 
 CFG = Config()
 
@@ -286,6 +287,22 @@ FROM  MEMBP_SDB.EXP_MST_BP_MASTER
 WHERE WORK_FLAG ='Y'
 GROUP BY FAM6
 """
+
+QUERY = QUERY.replace("gui_eba_2yr_test", CFG.NEW_TABLE_NAME)
+
+DEFAULT_O9_SQL = """
+-- Optional: place exact SQL from gist in o9_upload.sql (or set O9_SQL_PATH env).
+-- Use token {new_table_name} if table name substitution is needed.
+SELECT *
+FROM {new_table_name}
+WHERE PLANID = :plan_id
+"""
+
+def load_o9_sql() -> str:
+    sql_path = Path(CFG.O9_SQL_PATH)
+    if sql_path.exists():
+        return sql_path.read_text(encoding="utf-8")
+    return DEFAULT_O9_SQL
 
 def sanitize_filename(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', '_', value.strip())
@@ -655,6 +672,44 @@ class ExcelProcessor:
         wb.save(summary_path)
         return summary_path
 
+    def _pivot_o9_result(self, df_raw: pd.DataFrame) -> pd.DataFrame:
+        if df_raw.empty:
+            return df_raw
+        month_col = next((c for c in ["YEARMONTH", "MONTH", "BASE_MONTH"] if c in df_raw.columns), None)
+        value_col = next((c for c in ["QTY", "VALUE", "AMOUNT", "VOL"] if c in df_raw.columns), None)
+        if not month_col or not value_col:
+            numeric_like_cols = [
+                c for c in df_raw.columns
+                if pd.api.types.is_numeric_dtype(df_raw[c]) and str(c).upper() not in {"PLANID"}
+            ]
+            if len(numeric_like_cols) == 1:
+                value_col = numeric_like_cols[0]
+                month_col = next((c for c in df_raw.columns if "MONTH" in str(c).upper()), None)
+        if not month_col or not value_col:
+            self.logger.warning("O9 피벗 기준 컬럼을 찾지 못해 원본 결과만 저장합니다.")
+            return df_raw
+        index_cols = [c for c in df_raw.columns if c not in {month_col, value_col}]
+        pivot_df = pd.pivot_table(
+            df_raw,
+            index=index_cols,
+            columns=month_col,
+            values=value_col,
+            aggfunc="sum",
+            fill_value=0,
+            observed=True,
+        ).reset_index()
+        return pivot_df
+
+    def build_o9_upload_file(self, df_o9: pd.DataFrame, output_dir: Path, planid: str) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = output_dir / f"o9_upload_{sanitize_filename(planid)}_{timestamp}.xlsx"
+        pivot_df = self._pivot_o9_result(df_o9)
+        with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+            df_o9.to_excel(writer, sheet_name="o9_raw", index=False)
+            pivot_df.to_excel(writer, sheet_name="o9_pivot", index=False)
+        self.logger.info("O9 업로드 파일 생성: %s", output_path)
+        return output_path
+
 class JobRunner:
     def __init__(self, app, logger):
         self.app = app
@@ -689,6 +744,9 @@ class JobRunner:
             df_sunipgo.to_excel(output_dir / 'df_sunipgo.xlsx', index=False)
             excel_processor = ExcelProcessor(self.logger)
             excel_processor.build_summary_files(df_sunipgo, df_info, output_dir)
+            o9_sql = load_o9_sql().replace("{new_table_name}", CFG.NEW_TABLE_NAME)
+            df_o9 = oracle.read_sql(o9_sql, params=params)
+            excel_processor.build_o9_upload_file(df_o9, output_dir, planid)
             self.logger.info(elapsed_text(start_time))
             self.app.after(0, lambda: messagebox.showinfo('완료', f'작업이 완료되었습니다.\n\nOutput 폴더:\n{output_dir}'))
         except Exception as e:
