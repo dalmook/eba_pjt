@@ -1,16 +1,11 @@
-# Required packages:
-#   pip install pandas numpy requests selenium webdriver-manager xlwings openpyxl oracledb xlsxwriter
-
 import os
 import re
 import time
 import queue
 import threading
 import logging
-import traceback
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -37,22 +32,17 @@ from openpyxl.utils import get_column_letter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-@dataclass(frozen=True)
-class Config:
-    DEFAULT_EDM_LINK: str = "http://edm2.sec.samsung.net/cc/link/verLink/174338140443604632/2"
-    INSTANTCLIENT_DIR: str = r"C:\instantclient"
-    ORACLE_HOST: str = os.getenv("ORACLE_HOST", "gmgsdd09-vip.sec.samsung.net")
-    ORACLE_PORT: int = int(os.getenv("ORACLE_PORT", "2541"))
-    ORACLE_SERVICE: str = os.getenv("ORACLE_SERVICE", "MEMSCM")
-    ORACLE_USER: str = os.getenv("ORACLE_USER", "memscm")
-    ORACLE_PW: str = os.getenv("ORACLE_PW", "mem01scm")
-    HTTP_PROXY: str = "http://12.26.204.100:8080"
-    HTTPS_PROXY: str = "http://12.26.204.100:8080"
-    OLD_TABLE_NAME: str = "gui_eba_2yr"
-    NEW_TABLE_NAME: str = "gui_eba_2yr_test"
-    REQUEST_TIMEOUT: int = 30
-
-CFG = Config()
+DEFAULT_EDM_LINK = "http://edm2.sec.samsung.net/cc/link/verLink/174338140443604632/2"
+INSTANTCLIENT_DIR = r"C:\instantclient"
+ORACLE_HOST = os.getenv("ORACLE_HOST", "gmgsdd09-vip.sec.samsung.net")
+ORACLE_PORT = int(os.getenv("ORACLE_PORT", "2541"))
+ORACLE_SERVICE = os.getenv("ORACLE_SERVICE", "MEMSCM")
+ORACLE_USER = os.getenv("ORACLE_USER", "memscm")
+ORACLE_PW = os.getenv("ORACLE_PW", "mem01scm")
+HTTP_PROXY = "http://12.26.204.100:8080"
+HTTPS_PROXY = "http://12.26.204.100:8080"
+OLD_TABLE_NAME = "gui_eba_2yr"
+NEW_TABLE_NAME = "gui_eba_2yr_test"
 
 GUBUN_VALUES = [
     "ASY_EOH", "CA", "CE", "CF", "CT", "C_TOT", "EDS_EOH", "FAB_EOH", "FAB_GUIDE",
@@ -341,46 +331,19 @@ class QueueLogHandler(logging.Handler):
 
 class CustomHttpClient(HttpClient):
     def get(self, url, params=None, **kwargs) -> requests.Response:
-        return NetworkClient().get(url, params=params, **kwargs)
+        return requests.get(url, params=params, proxies={'http': HTTP_PROXY, 'https': HTTPS_PROXY}, verify=False, **kwargs)
 
-class NetworkClient:
-    def __init__(self, logger=None):
-        self.logger = logger or logging.getLogger("eba_tool")
-        self.session = requests.Session()
-        self.session.proxies.update({"http": CFG.HTTP_PROXY, "https": CFG.HTTPS_PROXY})
-        self.session.verify = False
-
-    def get(self, url, params=None, **kwargs):
-        timeout = kwargs.pop("timeout", CFG.REQUEST_TIMEOUT)
-        try:
-            resp = self.session.get(url, params=params, timeout=timeout, **kwargs)
-            resp.raise_for_status()
-            return resp
-        except Exception:
-            self.logger.exception("GET 요청 실패: %s", url)
-            raise
-
-    def post(self, url, data=None, json=None, **kwargs):
-        timeout = kwargs.pop("timeout", CFG.REQUEST_TIMEOUT)
-        try:
-            resp = self.session.post(url, data=data, json=json, timeout=timeout, **kwargs)
-            resp.raise_for_status()
-            return resp
-        except Exception:
-            self.logger.exception("POST 요청 실패: %s", url)
-            raise
-
-class OracleService:
+class OracleHelper:
     def __init__(self, logger):
         self.logger = logger
         self.conn = None
     def connect(self):
         try:
-            oracledb.init_oracle_client(lib_dir=CFG.INSTANTCLIENT_DIR)
+            oracledb.init_oracle_client(lib_dir=INSTANTCLIENT_DIR)
         except Exception:
             pass
-        dsn = f"{CFG.ORACLE_HOST}:{CFG.ORACLE_PORT}/{CFG.ORACLE_SERVICE}"
-        self.conn = oracledb.connect(user=CFG.ORACLE_USER, password=CFG.ORACLE_PW, dsn=dsn)
+        dsn = f"{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE}"
+        self.conn = oracledb.connect(user=ORACLE_USER, password=ORACLE_PW, dsn=dsn)
         self.logger.info('Oracle 연결 완료')
     def close(self):
         if self.conn:
@@ -449,7 +412,7 @@ class OracleService:
     def read_sql(self, sql, params=None):
         return pd.read_sql(sql, self.conn, params=params)
 
-class EDMClient:
+class ExcelEbaReader:
     def __init__(self, logger):
         self.logger = logger
     def build_driver(self):
@@ -489,23 +452,9 @@ class EDMClient:
         driver = self.build_driver()
         try:
             driver.get(edm_link)
-            button_selectors = [
-                (By.CSS_SELECTOR, "div.btns span.r a:nth-child(2)"),
-                (By.XPATH, "//a[contains(.,'보기') or contains(.,'열기') or contains(.,'Open') or contains(.,'View')]"),
-                (By.XPATH, "//button[contains(.,'보기') or contains(.,'열기') or contains(.,'Open') or contains(.,'View')]"),
-            ]
-            clicked = False
-            for by, selector in button_selectors:
-                try:
-                    element = WebDriverWait(driver, timeout=8).until(EC.element_to_be_clickable((by, selector)))
-                    self.logger.info('EDM 버튼 탐지: %s', element.text)
-                    element.click()
-                    clicked = True
-                    break
-                except Exception:
-                    continue
-            if not clicked:
-                raise RuntimeError("EDM 화면에서 보기/열기 버튼을 찾지 못했습니다.")
+            element = WebDriverWait(driver, timeout=15).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.btns span.r a:nth-child(2)')))
+            self.logger.info('EDM 버튼 탐지: %s', element.text)
+            element.click()
             time.sleep(5)
         finally:
             driver.quit()
@@ -552,7 +501,7 @@ class EDMClient:
         except Exception:
             pass
 
-class DataTransformer:
+class EbaProcessor:
     def __init__(self, logger):
         self.logger = logger
     def prepare_raw_df(self, df, df_fam6, planid):
@@ -566,11 +515,6 @@ class DataTransformer:
         if 'FAM6_ADJ' not in df.columns:
             raise RuntimeError('FAM6 merge 후 FAM6_ADJ 컬럼이 없습니다.')
         return df
-class ExcelProcessor:
-    def __init__(self, logger):
-        self.logger = logger
-        self.transformer = DataTransformer(logger)
-
     def build_summary_files(self, df_sunipgo, df_info, output_dir):
         df_sunipgo2 = df_sunipgo.merge(DF_LINE, how='left', on='LINE')
         df_sunipgo2 = df_sunipgo2.merge(DF_DR, how='left', on='DESIGN_RULE')
@@ -655,60 +599,7 @@ class ExcelProcessor:
         wb.save(summary_path)
         return summary_path
 
-class JobRunner:
-    def __init__(self, app, logger):
-        self.app = app
-        self.logger = logger
-
-    def run(self, edm_link, planid, keep_excel_open=False):
-        start_time = datetime.now()
-        wb = None
-        oracle = OracleService(self.logger)
-        try:
-            output_dir = Path.cwd() / 'output' / f"{datetime.now():%Y%m%d_%H%M%S}_{sanitize_filename(planid)}"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            self.app.last_output_dir = output_dir
-            self.logger.info('Output 폴더: %s', output_dir)
-            reader = EDMClient(self.logger)
-            wb = reader.open_edm_and_attach_workbook(edm_link)
-            df_raw, df_fam6 = reader.read_simulation_and_fam6(wb)
-            if not keep_excel_open:
-                reader.close_workbook_safe(wb)
-                wb = None
-            transformer = DataTransformer(self.logger)
-            df = transformer.prepare_raw_df(df_raw, df_fam6, planid)
-            with pd.ExcelWriter(output_dir / 'ebaTOgscmdb.xlsx', engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, header=True, startrow=0, startcol=0)
-            oracle.connect()
-            oracle.delete_table_if_exists(CFG.NEW_TABLE_NAME)
-            oracle.copy_table_structure(CFG.OLD_TABLE_NAME, CFG.NEW_TABLE_NAME)
-            oracle.insert_dataframe_into_table(df, CFG.NEW_TABLE_NAME)
-            params = {'plan_id': planid}
-            df_sunipgo = oracle.read_sql(QUERY, params=params)
-            df_info = oracle.read_sql(QUERY2)
-            df_sunipgo.to_excel(output_dir / 'df_sunipgo.xlsx', index=False)
-            excel_processor = ExcelProcessor(self.logger)
-            excel_processor.build_summary_files(df_sunipgo, df_info, output_dir)
-            self.logger.info(elapsed_text(start_time))
-            self.app.after(0, lambda: messagebox.showinfo('완료', f'작업이 완료되었습니다.\n\nOutput 폴더:\n{output_dir}'))
-        except Exception as e:
-            self.logger.error("오류 요약:\n%s", traceback.format_exc(limit=5))
-            self.logger.exception('실행 중 오류 발생')
-            self.app.after(0, lambda: messagebox.showerror('오류', f'작업 중 오류가 발생했습니다.\n\n{e}'))
-        finally:
-            try:
-                oracle.close()
-            except Exception:
-                pass
-            if wb is not None and not keep_excel_open:
-                try:
-                    wb.close()
-                except Exception:
-                    pass
-            self.app.after(0, self.app._finish_run)
-
-
-class App(tk.Tk):
+class EbaTkApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('EBA → GSCM DB / Summary Tool')
@@ -728,7 +619,7 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=12)
         top.pack(fill='x')
         ttk.Label(top, text='EDM LINK').grid(row=0, column=0, sticky='w', padx=(0, 8), pady=4)
-        self.edm_var = tk.StringVar(value=CFG.DEFAULT_EDM_LINK)
+        self.edm_var = tk.StringVar(value=DEFAULT_EDM_LINK)
         ttk.Entry(top, textvariable=self.edm_var, width=110).grid(row=0, column=1, sticky='ew', pady=4)
         ttk.Label(top, text='PLANID').grid(row=1, column=0, sticky='w', padx=(0, 8), pady=4)
         self.planid_var = tk.StringVar()
@@ -772,9 +663,52 @@ class App(tk.Tk):
             return
         self.run_btn.config(state='disabled')
         self.status_var.set('실행 중...')
-        runner = JobRunner(self, self.logger)
-        self.worker = threading.Thread(target=runner.run, args=(edm_link, planid, self.keep_excel_open_var.get()), daemon=True)
+        self.worker = threading.Thread(target=self._run_job, args=(edm_link, planid), daemon=True)
         self.worker.start()
+    def _run_job(self, edm_link, planid):
+        start_time = datetime.now()
+        wb = None
+        oracle = OracleHelper(self.logger)
+        try:
+            output_dir = Path.cwd() / 'output' / f"{datetime.now():%Y%m%d_%H%M%S}_{sanitize_filename(planid)}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.last_output_dir = output_dir
+            self.logger.info('Output 폴더: %s', output_dir)
+            reader = ExcelEbaReader(self.logger)
+            wb = reader.open_edm_and_attach_workbook(edm_link)
+            df_raw, df_fam6 = reader.read_simulation_and_fam6(wb)
+            if not self.keep_excel_open_var.get():
+                reader.close_workbook_safe(wb)
+                wb = None
+            processor = EbaProcessor(self.logger)
+            df = processor.prepare_raw_df(df_raw, df_fam6, planid)
+            with pd.ExcelWriter(output_dir / 'ebaTOgscmdb.xlsx', engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, header=True, startrow=0, startcol=0)
+            oracle.connect()
+            oracle.delete_table_if_exists(NEW_TABLE_NAME)
+            oracle.copy_table_structure(OLD_TABLE_NAME, NEW_TABLE_NAME)
+            oracle.insert_dataframe_into_table(df, NEW_TABLE_NAME)
+            params = {'plan_id': planid}
+            df_sunipgo = oracle.read_sql(QUERY, params=params)
+            df_info = oracle.read_sql(QUERY2)
+            df_sunipgo.to_excel(output_dir / 'df_sunipgo.xlsx', index=False)
+            processor.build_summary_files(df_sunipgo, df_info, output_dir)
+            self.logger.info(elapsed_text(start_time))
+            self.after(0, lambda: messagebox.showinfo('완료', f'작업이 완료되었습니다.\n\nOutput 폴더:\n{output_dir}'))
+        except Exception as e:
+            self.logger.exception('실행 중 오류 발생')
+            self.after(0, lambda: messagebox.showerror('오류', f'작업 중 오류가 발생했습니다.\n\n{e}'))
+        finally:
+            try:
+                oracle.close()
+            except Exception:
+                pass
+            if wb is not None and not self.keep_excel_open_var.get():
+                try:
+                    wb.close()
+                except Exception:
+                    pass
+            self.after(0, self._finish_run)
     def _finish_run(self):
         self.run_btn.config(state='normal')
         self.status_var.set('대기 중')
@@ -790,7 +724,7 @@ class App(tk.Tk):
             self.after(200, self._drain_log_queue)
 
 def main():
-    app = App()
+    app = EbaTkApp()
     app.mainloop()
 
 if __name__ == '__main__':
