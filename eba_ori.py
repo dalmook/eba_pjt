@@ -54,7 +54,7 @@ class Config:
     NEW_TABLE_NAME: str = "gui_eba_2yr_new"
     REQUEST_TIMEOUT: int = 30
     SETTINGS_PATH: str = "eba_settings.json"
-    FAM6_MAPPING_PATH: str = "fam6_mapping.csv"
+    FAM6_MAPPING_PATH: str = "fam6_mapping.txt"
 
 CFG = Config()
 
@@ -398,35 +398,42 @@ def save_settings(data: dict):
 def load_fam6_mapping_file() -> pd.DataFrame:
     path = Path(CFG.FAM6_MAPPING_PATH)
     if path.exists():
-        df = None
+        raw_text = None
         last_err = None
         for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr", "latin1"]:
             try:
-                df = pd.read_csv(path, encoding=enc)
+                raw_text = path.read_text(encoding=enc)
                 break
             except Exception as e:
                 last_err = e
-        if df is None:
-            raise RuntimeError(f"FAM6 매핑 CSV를 읽지 못했습니다: {path} ({last_err})")
-        # markdown table 형태(FAM6 | FAM6_ADJ) 붙여넣기 대응
-        if not {"FAM6", "FAM6_ADJ"}.issubset(df.columns):
-            raw_text = path.read_text(encoding="utf-8", errors="ignore")
-            rows = []
-            for line in raw_text.splitlines():
-                if "|" not in line:
-                    continue
+        if raw_text is None:
+            raise RuntimeError(f"FAM6 매핑 TXT를 읽지 못했습니다: {path} ({last_err})")
+        rows = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "\t" in line:
+                parts = [p.strip() for p in line.split("\t")]
+            elif "|" in line:
                 parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 2 and parts[0] and parts[1] and parts[0] != "FAM6" and not set(parts[0]) <= {"-"}:
-                    rows.append((parts[0], parts[1]))
-            if rows:
-                df = pd.DataFrame(rows, columns=["FAM6", "FAM6_ADJ"])
-        if "FAM6" in df.columns and "FAM6_ADJ" in df.columns:
-            return df[["FAM6", "FAM6_ADJ"]].dropna(how="all")
+            elif "," in line:
+                parts = [p.strip() for p in line.split(",")]
+            else:
+                continue
+            if len(parts) < 2:
+                continue
+            if parts[0].upper() == "FAM6" or set(parts[0]) <= {"-"}:
+                continue
+            rows.append((parts[0], parts[1]))
+        if rows:
+            return pd.DataFrame(rows, columns=["FAM6", "FAM6_ADJ"]).dropna(how="all")
     return pd.DataFrame(columns=["FAM6", "FAM6_ADJ"])
 
 def save_fam6_mapping_file(df: pd.DataFrame):
     df = df[["FAM6", "FAM6_ADJ"]].fillna("")
-    df.to_csv(CFG.FAM6_MAPPING_PATH, index=False, encoding="utf-8-sig")
+    lines = ["FAM6\tFAM6_ADJ"] + [f"{row.FAM6}\t{row.FAM6_ADJ}" for row in df.itertuples(index=False)]
+    Path(CFG.FAM6_MAPPING_PATH).write_text("\n".join(lines), encoding="utf-8-sig")
 
 def month_to_quarter(month: int):
     if 1 <= month <= 3:
