@@ -702,8 +702,21 @@ class EDMClient:
 class DataTransformer:
     def __init__(self, logger):
         self.logger = logger
+
+    @staticmethod
+    def _normalize_line_value(v):
+        if pd.isna(v):
+            return v
+        s = str(v).strip()
+        if s.endswith('.0'):
+            head = s[:-2]
+            if head.isdigit():
+                s = head
+        return s
+
     def prepare_raw_df(self, df, df_fam6, planid):
         df = df[df['GUBUN'].isin(GUBUN_VALUES)].copy().reset_index(drop=True)
+        df['LINE'] = df['LINE'].apply(self._normalize_line_value)
         for col in ['PRE_M9', 'PRE_M10', 'PRE_M11', 'PRE_M12']:
             df[col] = 0
         df['PLANID'] = planid
@@ -719,6 +732,8 @@ class ExcelProcessor:
         self.transformer = DataTransformer(logger)
 
     def build_summary_files(self, df_sunipgo, df_info, output_dir):
+        df_sunipgo = df_sunipgo.copy()
+        df_sunipgo['LINE'] = df_sunipgo['LINE'].apply(DataTransformer._normalize_line_value)
         df_sunipgo2 = df_sunipgo.merge(DF_LINE, how='left', on='LINE')
         df_sunipgo2 = df_sunipgo2.merge(DF_DR, how='left', on='DESIGN_RULE')
         df_sunipgo2['LINE2'] = pd.Categorical(df_sunipgo2['LINE2'], categories=ORDER_LINE3, ordered=True)
